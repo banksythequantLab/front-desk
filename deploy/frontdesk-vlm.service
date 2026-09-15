@@ -1,0 +1,36 @@
+[Unit]
+Description=Front Desk vision model (Qwen3-VL 30B, Vulkan) on :8081
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=banksiai
+Group=banksiai
+# Needs render/video for /dev/kfd. A process that starts without these groups
+# silently falls back to CPU - no error, just half speed. This is the single
+# most expensive failure mode on this box; it cost us weeks once already.
+SupplementaryGroups=render video
+
+WorkingDirectory=/opt/banksy
+ExecStart=/opt/banksy/llama.cpp/build-vulkan/bin/llama-server \
+  -m /opt/banksy/models/vlm/Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf \
+  --mmproj /opt/banksy/models/vlm/mmproj-Qwen3VL-30B-A3B-Instruct-F16.gguf \
+  -ngl 99 --host 0.0.0.0 --port 8081 -c 8192 -t 16
+
+Restart=on-failure
+RestartSec=10
+# The model is ~19 GB; give it room to load before systemd loses patience.
+TimeoutStartSec=300
+
+StandardOutput=append:/opt/banksy/logs/vlm_server.log
+StandardError=append:/opt/banksy/logs/vlm_server.log
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/banksy/logs
+
+[Install]
+WantedBy=multi-user.target
