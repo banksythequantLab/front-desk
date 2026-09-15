@@ -24,6 +24,8 @@ Env:
   FRONTDESK_PORT       default 8310 (8300/8302/8303 are taken by the voice stack)
 """
 
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -73,6 +75,23 @@ _lock = threading.Lock()
 
 # ---------------------------------------------------------------- security
 
+def _key_variants():
+    """Ring issues the signing key base64-encoded.
+
+    Whether the HMAC is computed over the decoded bytes or over the base64
+    string itself is not documented, so we try both and record which one
+    verified. Once a real delivery tells us, pin it and delete the other.
+    """
+    variants = [("utf8", HMAC_KEY.encode())]
+    try:
+        decoded = base64.b64decode(HMAC_KEY, validate=True)
+        if decoded:
+            variants.append(("base64", decoded))
+    except (binascii.Error, ValueError):
+        pass
+    return variants
+
+
 def verify_signature(raw: bytes, headers) -> tuple[bool, str]:
     """Constant-time HMAC-SHA256 (hex) check over the raw body.
 
@@ -81,16 +100,16 @@ def verify_signature(raw: bytes, headers) -> tuple[bool, str]:
     if not HMAC_KEY:
         return False, "no HMAC key configured"
 
-    expected = hmac.new(HMAC_KEY.encode(), raw, hashlib.sha256).hexdigest()
-
     for name in SIG_HEADER_CANDIDATES:
         got = headers.get(name)
         if not got:
             continue
-        # tolerate "sha256=<hex>" prefixing
         candidate = got.split("=", 1)[1] if got.lower().startswith("sha256=") else got
-        if hmac.compare_digest(candidate.strip().lower(), expected):
-            return True, name
+        candidate = candidate.strip().lower()
+        for enc, key in _key_variants():
+            expected = hmac.new(key, raw, hashlib.sha256).hexdigest()
+            if hmac.compare_digest(candidate, expected):
+                return True, f"{name} ({enc} key)"
         return False, f"bad signature on {name}"
 
     return False, "no signature header present"

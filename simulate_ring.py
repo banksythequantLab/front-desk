@@ -139,5 +139,30 @@ check("non-Ring payload stored separately", c, 200, b)
 c, b = post(payload(), sign_with=KEY, header="X-Hub-Signature-256")
 check("alternate header accepted", c, 200, b)
 
+# 10. base64-decoded key path — Ring issues the key base64-encoded and does not
+# document whether the HMAC is over the decoded bytes or the string. The
+# receiver accepts either; this proves the decoded path works.
+import base64 as _b64
+try:
+    _decoded = _b64.b64decode(KEY, validate=True)
+except Exception:
+    _decoded = b""
+if _decoded:
+    orig = payload()
+    raw = json.dumps(orig).encode()
+    sig = hmac.new(_decoded, raw, hashlib.sha256).hexdigest()
+    req = urllib.request.Request(
+        f"{BASE}/ring/webhook", data=raw,
+        headers={"Content-Type": "application/json", "X-Ring-Signature": sig},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            c, b = r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        c, b = e.code, json.loads(e.read() or b"{}")
+    check("base64-decoded key accepted", c, 200, b)
+else:
+    print("  [SKIP] base64-decoded key (test key is not valid base64)")
+
 print(f"\n{sum(results)}/{len(results)} checks passed")
 sys.exit(0 if all(results) else 1)
