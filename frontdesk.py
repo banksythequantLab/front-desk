@@ -29,8 +29,11 @@ import hmac
 import json
 import logging
 import os
+import queue
 import sys
+import tempfile
 import threading
+import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -142,26 +145,88 @@ def is_ring_shaped(body: dict) -> bool:
 
 # ---------------------------------------------------------------- pipeline
 
-def classify(event: dict) -> dict:
-    """Placeholder. The real version pulls the snapshot and runs the local VLM.
+# Classification takes seconds; Ring retries on non-2xx. So the webhook ACKS
+# FIRST and a worker thread classifies afterwards, appending a second record
+# keyed by event_id. Readers merge the two. The store stays append-only.
 
-    Returns an explicit 'unclassified' verdict rather than guessing, so nothing
-    downstream mistakes a stub for a decision.
-    """
-    return {
-        "verdict": "unclassified",
-        "reason": "VLM not wired yet",
-        "needs_snapshot": event.get("thumbnail_url") is None,
-    }
+CLASSIFY_ON = os.environ.get("FD_CLASSIFY", "1") != "0"
+RING_TOKEN = os.environ.get("FD_RING_TOKEN", "")
+_queue = queue.Queue(maxsize=500)
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "classifier"))
 
 
-def route(event: dict, verdict: dict) -> dict:
-    """Placeholder for notification dispatch.
+def fetch_snapshot(url):
+    """Download an event snapshot to a temp file. Returns (path, error)."""
+    if not url:
+        return None, "event carried no snapshot URL"
+    req = urllib.request.Request(url)
+    if RING_TOKEN:
+        req.add_header("Authorization", f"Bearer {RING_TOKEN}")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+    except Exception as e:                      # noqa: BLE001 - report any failure
+        return None, f"snapshot fetch failed: {e}"
+    if len(data) < 1024:
+        return None, f"snapshot too small ({len(data)} bytes)"
+    fd, path = tempfile.mkstemp(suffix=".jpg", prefix="fd_snap_")
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    return path, None
 
-    Deliberately does NOT place calls or send messages. Outbound anything is
-    Derek's call to switch on, and the credentials aren't here.
-    """
-    return {"action": "logged_only", "would_notify": verdict["verdict"] != "unclassified"}
+
+def classify_event(event):
+    """Snapshot -> VLM -> rules. Returns a verdict dict, never raises."""
+    path, err = fetch_snapshot(event.get("thumbnail_url"))
+    if err:
+        # No image is not an escalation — it is a gap. Escalating here would
+        # flood the review queue every time a snapshot is unavailable.
+        return {"disposition": "no_snapshot", "escalate": False, "why": err}
+    try:
+        from classify import classify as run_classify
+        out = run_classify(path)
+    except Exception as e:                      # noqa: BLE001
+        return {"disposition": "error", "escalate": True,
+                "why": f"classifier raised: {e}"}
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return out
+
+
+def _worker():
+    while True:
+        event = _queue.get()
+        if event is None:
+            return
+        try:
+            verdict = classify_event(event)
+            persist({"record_type": "classification",
+                     "event_id": event.get("event_id"),
+                     "device_id": event.get("device_id"),
+                     "classified_at": datetime.now(timezone.utc).isoformat(),
+                     "verdict": verdict})
+            log.info("classified %s -> %s (escalate=%s)", event.get("event_id"),
+                     verdict.get("disposition"), verdict.get("escalate"))
+        except Exception as e:                  # noqa: BLE001
+            log.exception("worker failed on %s: %s", event.get("event_id"), e)
+        finally:
+            _queue.task_done()
+
+
+def enqueue(event):
+    if not CLASSIFY_ON:
+        return "classification_disabled"
+    try:
+        _queue.put_nowait(event)
+        return "queued"
+    except queue.Full:
+        log.warning("classification queue full, dropping %s", event.get("event_id"))
+        return "queue_full"
 
 
 def persist(record: dict) -> None:
@@ -251,19 +316,25 @@ class Handler(BaseHTTPRequestHandler):
 
         event = normalize(body)
         event["sig_header"] = detail
-        verdict = classify(event)
-        action = route(event, verdict)
-        persist({**event, "verdict": verdict, "action": action})
+        event["record_type"] = "event"
+        queued = enqueue(event)
+        event["classification"] = queued
+        persist(event)
 
-        log.info("event %s type=%s device=%s verdict=%s",
+        log.info("event %s type=%s device=%s -> %s",
                  event["event_id"], event["event_type"],
-                 event["device_id"], verdict["verdict"])
+                 event["device_id"], queued)
         return self._json(200, {"status": "processed", "event_id": event["event_id"]})
 
 
 def main():
     if not HMAC_KEY:
         log.warning("FRONTDESK_HMAC_KEY is unset - every webhook will be rejected (fail closed)")
+    if CLASSIFY_ON:
+        threading.Thread(target=_worker, daemon=True, name="classifier").start()
+        log.info("classifier worker started (vlm backend enabled)")
+    else:
+        log.info("FD_CLASSIFY=0 - events will be stored but not classified")
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     log.info("Front Desk listening on :%d  store=%s", PORT, os.path.abspath(STORE))
     try:

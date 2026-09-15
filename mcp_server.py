@@ -39,19 +39,36 @@ PUBLIC = ("event_id", "event_type", "timestamp", "device_id", "source_type")
 
 
 def _load():
+    """Read the store and merge classification records onto their events.
+
+    frontdesk.py acks the webhook before classifying, then appends a separate
+    classification record keyed by event_id. The store stays append-only; the
+    join happens here on read.
+    """
     if not os.path.exists(STORE):
         return []
-    out = []
+    events, verdicts = [], {}
     with open(STORE, encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line:
                 continue
             try:
-                out.append(json.loads(line))
+                rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-    return out
+            if rec.get("record_type") == "classification":
+                eid = rec.get("event_id")
+                if eid:
+                    verdicts[eid] = rec          # last write wins
+            else:
+                events.append(rec)
+    for ev in events:
+        v = verdicts.get(ev.get("event_id"))
+        if v:
+            ev["verdict"] = v.get("verdict")
+            ev["classified_at"] = v.get("classified_at")
+    return events
 
 
 def _ts(rec):

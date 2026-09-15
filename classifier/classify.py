@@ -19,20 +19,37 @@ The model never sees the words "process server". If it starts guessing legal
 categories on its own, that is a bug.
 
 Env:
-  FD_VLM_URL     default http://127.0.0.1:11434
-  FD_VLM_MODEL   e.g. qwen2.5vl:3b, llava:7b, moondream
+  FD_VLM_URL      default http://banksy-box-01.local:8081
+  FD_VLM_BACKEND  llamacpp (default) or ollama
+  FD_VLM_MODEL    only used by the ollama backend
+  FD_VLM_MAX_EDGE default 1280 — see note below
+
+PRE-PROCESSING NOTE:
+Image tokens dominate the prompt. Measured on the box, a full-resolution phone
+photo cost 4,319 prompt tokens and 17.1s; capping the long edge at 1568 cut it
+to 1,611 tokens and 7.2s for identical output.
+
+The cap is 1280 rather than lower because that is where small-feature detail
+starts disappearing: at 1280 the model still reported indicator lights on a
+device, at 1024 it stopped. Fine detail is the whole ballgame here — a manila
+envelope versus a small box is the distinction possible_service rests on — so
+we spend the extra second.
 """
 
 import base64
+import io
 import json
 import os
 import sys
 
 import requests
+from PIL import Image, ImageOps
 
-VLM_URL = os.environ.get("FD_VLM_URL", "http://127.0.0.1:11434")
-VLM_MODEL = os.environ.get("FD_VLM_MODEL", "qwen2.5vl:3b")
-TIMEOUT = int(os.environ.get("FD_VLM_TIMEOUT", "120"))
+VLM_URL = os.environ.get("FD_VLM_URL", "http://banksy-box-01.local:8081")
+BACKEND = os.environ.get("FD_VLM_BACKEND", "llamacpp").lower()
+VLM_MODEL = os.environ.get("FD_VLM_MODEL", "qwen3-vl")
+MAX_EDGE = int(os.environ.get("FD_VLM_MAX_EDGE", "1280"))
+TIMEOUT = int(os.environ.get("FD_VLM_TIMEOUT", "180"))
 
 OBSERVATION_PROMPT = """You are looking at a still frame from a doorbell camera.
 
@@ -66,31 +83,68 @@ REQUIRED_KEYS = [
 ]
 
 
-def observe(image_path, model=None):
-    """Ask the VLM for observables. Returns (observations, error)."""
-    model = model or VLM_MODEL
-    with open(image_path, "rb") as fh:
-        b64 = base64.b64encode(fh.read()).decode()
+def prep_image(path, max_edge=None):
+    """Downscale, honour EXIF rotation, re-encode as JPEG. Returns bytes.
 
-    payload = {
-        "model": model,
-        "prompt": OBSERVATION_PROMPT,
-        "images": [b64],
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0},
-    }
-    try:
-        r = requests.post(f"{VLM_URL}/api/generate", json=payload, timeout=TIMEOUT)
-    except requests.RequestException as e:
-        return None, f"vlm unreachable: {e}"
-    if r.status_code != 200:
-        return None, f"vlm HTTP {r.status_code}: {r.text[:200]}"
+    Sending a phone-resolution frame wastes most of the prompt budget on image
+    tokens for no accuracy gain — see PRE-PROCESSING NOTE above.
+    """
+    max_edge = max_edge or MAX_EDGE
+    im = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+    w, h = im.size
+    scale = min(1.0, max_edge / max(w, h))
+    if scale < 1.0:
+        im = im.resize((round(w * scale), round(h * scale)), Image.LANCZOS)
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=85, optimize=True)
+    return buf.getvalue(), im.size
 
-    text = (r.json().get("response") or "").strip()
+
+def _strip_fence(text):
+    text = (text or "").strip()
     if text.startswith("```"):
         text = text.strip("`")
         text = text.split("\n", 1)[1] if "\n" in text else text
+    return text.strip()
+
+
+def observe(image_path, model=None):
+    """Ask the VLM for observables. Returns (observations, error)."""
+    try:
+        jpg, dims = prep_image(image_path)
+    except Exception as e:
+        return None, f"image prep failed: {e}"
+    b64 = base64.b64encode(jpg).decode()
+
+    try:
+        if BACKEND == "ollama":
+            r = requests.post(
+                f"{VLM_URL}/api/generate",
+                json={"model": model or VLM_MODEL, "prompt": OBSERVATION_PROMPT,
+                      "images": [b64], "stream": False, "format": "json",
+                      "options": {"temperature": 0}},
+                timeout=TIMEOUT)
+            raw = (r.json().get("response") or "") if r.status_code == 200 else ""
+        else:
+            r = requests.post(
+                f"{VLM_URL}/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": [
+                          {"type": "text", "text": OBSERVATION_PROMPT},
+                          {"type": "image_url",
+                           "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}],
+                      "temperature": 0, "max_tokens": 400},
+                timeout=TIMEOUT)
+            raw = (r.json()["choices"][0]["message"]["content"]
+                   if r.status_code == 200 else "")
+    except requests.RequestException as e:
+        return None, f"vlm unreachable: {e}"
+    except (KeyError, ValueError) as e:
+        return None, f"unexpected vlm response shape: {e}"
+
+    if r.status_code != 200:
+        return None, f"vlm HTTP {r.status_code}: {r.text[:200]}"
+
+    text = _strip_fence(raw)
     try:
         obs = json.loads(text)
     except json.JSONDecodeError:
@@ -103,6 +157,7 @@ def observe(image_path, model=None):
         obs[k] = None
     if missing:
         obs["_missing_keys"] = missing
+    obs["_sent_dims"] = list(dims)
     return obs, None
 
 
