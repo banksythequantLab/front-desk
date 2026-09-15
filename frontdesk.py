@@ -41,6 +41,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import oauth_provider as oap
 
 # ---------------------------------------------------------------- config
 
@@ -166,76 +167,26 @@ def is_ring_shaped(body: dict) -> bool:
 
 
 # ---------------------------------------------------------------- oauth
+# Provider side lives in oauth_provider.py. Ring is the CLIENT; we are the
+# authorization server. See the direction note in that module.
 
-# Account linking uses the OAuth authorization-code flow. The redirect URI must
-# be public HTTPS, which is what the tunnel gives us. Tokens are written to a
-# gitignored file, never to the repo and never logged.
-#
-# UNVERIFIED: the token endpoint path. RING_OAUTH_BASE/RING_TOKEN_PATH are
-# overridable so a docs correction is a config change, not a code change.
-
-CLIENT_ID = os.environ.get("RING_CLIENT_ID", "")
-CLIENT_SECRET = os.environ.get("RING_CLIENT_SECRET", "")
-OAUTH_BASE = os.environ.get("RING_OAUTH_BASE", "https://oauth.ring.com")
-AUTH_PATH = os.environ.get("RING_AUTH_PATH", "/authorize")
-TOKEN_PATH = os.environ.get("RING_TOKEN_PATH", "/token")
-REDIRECT_URI = os.environ.get(
-    "RING_REDIRECT_URI", "https://frontdesk.quantcity.org/oauth/callback")
-SCOPES = os.environ.get("RING_SCOPES", "ava.v1:read")
-TOKEN_FILE = os.environ.get("RING_TOKEN_FILE",
-                            os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                         ".tokens.json"))
-
-_states = set()
-
-
-def auth_url():
-    state = secrets.token_urlsafe(24)
-    _states.add(state)
-    q = urllib.parse.urlencode({
-        "client_id": CLIENT_ID,
-        "response_type": "code",
-        "redirect_uri": REDIRECT_URI,
-        "scope": SCOPES,
-        "state": state,
-    })
-    return f"{OAUTH_BASE}{AUTH_PATH}?{q}"
-
-
-def exchange_code(code):
-    """Trade an authorization code for tokens. Returns (payload, error)."""
-    if not (CLIENT_ID and CLIENT_SECRET):
-        return None, "RING_CLIENT_ID / RING_CLIENT_SECRET not configured"
-    data = urllib.parse.urlencode({
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": REDIRECT_URI,
-    }).encode()
-    basic = base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
-    req = urllib.request.Request(
-        f"{OAUTH_BASE}{TOKEN_PATH}", data=data, method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded",
-                 "Authorization": f"Basic {basic}"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read()), None
-    except urllib.error.HTTPError as e:
-        return None, f"token exchange HTTP {e.code}: {e.read()[:300].decode(errors='replace')}"
-    except Exception as e:                      # noqa: BLE001
-        return None, f"token exchange failed: {e}"
-
-
-def save_tokens(payload):
-    payload = dict(payload)
-    payload["obtained_at"] = datetime.now(timezone.utc).isoformat()
-    with open(TOKEN_FILE, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2)
-    try:
-        os.chmod(TOKEN_FILE, 0o600)
-    except OSError:
-        pass
-
-
+CONSENT_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Link Front Desk</title><style>
+body{{background:#0b1019;color:#f0f4fa;font-family:"Segoe UI",system-ui,sans-serif;
+display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}}
+.card{{border:2px solid #26344a;border-radius:16px;padding:44px;max-width:460px}}
+h1{{font-size:26px;margin:0 0 10px}} p{{color:#8a9ab0;line-height:1.55}}
+code{{color:#40c4a8}}
+a.btn{{display:inline-block;margin-top:26px;background:#40c4a8;color:#0b1019;
+text-decoration:none;font-weight:700;padding:14px 30px;border-radius:10px}}
+</style></head><body><div class="card">
+<h1>Link your Ring account</h1>
+<p>Front Desk will receive door events from Ring and classify them on hardware
+you control. Requested access: <code>{scope}</code></p>
+<p>Images are processed locally and are never sent to a cloud AI service.</p>
+<a class="btn" href="{href}">Allow</a>
+</div></body></html>"""
 # ---------------------------------------------------------------- pipeline
 
 # Classification takes seconds; Ring retries on non-2xx. So the webhook ACKS
@@ -377,42 +328,68 @@ class Handler(BaseHTTPRequestHandler):
             # HMAC signature and is unaffected by this.
             return self._json(200, {"ok": True, "endpoint": "ring-webhook",
                                     "accepts": ["POST"]})
-        if path == "/oauth/start":
-            if not CLIENT_ID:
-                return self._json(500, {"error": "RING_CLIENT_ID not configured"})
-            url = auth_url()
+        if path == "/oauth/authorize":
+            # Ring sends the user here to link their account. Private app with a
+            # single operator, so this is a confirm page rather than a login.
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            redirect_uri = (qs.get("redirect_uri") or [""])[0]
+            state = (qs.get("state") or [""])[0]
+            scope = (qs.get("scope") or ["ava.v1:read"])[0]
+            client_id = (qs.get("client_id") or [""])[0]
+            log.info("authorize request client_id=%s redirect_uri=%s scope=%s",
+                     client_id or "(none)", redirect_uri or "(none)", scope)
+            if not redirect_uri.startswith("https://"):
+                return self._json(400, {"error": "invalid_request",
+                                        "detail": "redirect_uri must be absolute https"})
+            if self.path.find("confirm=1") == -1:
+                page = CONSENT_PAGE.format(
+                    scope=scope,
+                    href=self.path + ("&" if "?" in self.path else "?") + "confirm=1")
+                body = page.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return None
+            code = oap.issue_code(redirect_uri, scope)
+            target = oap.build_redirect(redirect_uri, code, state)
+            log.info("authorize granted, redirecting back to client")
             self.send_response(302)
-            self.send_header("Location", url)
+            self.send_header("Location", target)
             self.send_header("Content-Length", "0")
             self.end_headers()
             return None
-        if path == "/oauth/callback":
-            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]
-                                       if "?" in self.path else "")
-            if qs.get("error"):
-                log.warning("oauth denied: %s", qs.get("error")[0])
-                return self._json(400, {"error": qs.get("error")[0]})
-            code = (qs.get("code") or [""])[0]
-            state = (qs.get("state") or [""])[0]
-            if not code:
-                return self._json(400, {"error": "no code in callback"})
-            if state not in _states:
-                log.warning("oauth state mismatch - possible CSRF, refusing")
-                return self._json(400, {"error": "state mismatch"})
-            _states.discard(state)
-            payload, err = exchange_code(code)
-            if err:
-                log.error("oauth exchange failed: %s", err)
-                return self._json(502, {"error": err})
-            save_tokens(payload)
-            # Never log or return the tokens themselves.
-            log.info("account linked: token stored (%s)",
-                     ", ".join(sorted(k for k in payload if "token" not in k.lower())))
-            return self._json(200, {"ok": True, "linked": True})
         return self._json(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path.split("?")[0] != "/ring/webhook":
+        path = self.path.split("?")[0]
+
+        if path == "/oauth/token":
+            # Ring exchanges an authorization code for an access token here.
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0 or length > 64 * 1024:
+                return self._json(400, {"error": "invalid_request"})
+            form = urllib.parse.parse_qs(self.rfile.read(length).decode(errors="replace"))
+            grant_type = form.get("grant_type", [""])[0]
+            cid, csec = oap.client_from_request(self.headers, form)
+            ok, why = oap.check_client(cid, csec)
+            if not ok:
+                log.warning("token request rejected: %s (client_id=%s)", why, cid or "(none)")
+                return self._json(401, {"error": "invalid_client"})
+            if grant_type != "authorization_code":
+                log.warning("unsupported grant_type=%s", grant_type)
+                return self._json(400, {"error": "unsupported_grant_type"})
+            code = form.get("code", [""])[0]
+            rec, err = oap.redeem_code(code, form.get("redirect_uri", [""])[0])
+            if err:
+                log.warning("token exchange failed: %s", err)
+                return self._json(400, {"error": "invalid_grant"})
+            tok = oap.issue_token(rec["scope"])
+            log.info("access token issued scope=%s ttl=%ss", rec["scope"], tok["expires_in"])
+            return self._json(200, tok)          # the only place a token is returned
+
+        if path != "/ring/webhook":
             return self._json(404, {"error": "not found"})
 
         length = int(self.headers.get("Content-Length") or 0)
