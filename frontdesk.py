@@ -265,17 +265,25 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path.split("?")[0] == "/health":
+        path = self.path.split("?")[0]
+        if path == "/health":
             count = 0
             if os.path.exists(STORE):
                 with open(STORE, encoding="utf-8") as fh:
                     count = sum(1 for _ in fh)
+            # No filesystem paths here: this endpoint is public.
             return self._json(200, {
                 "ok": True,
                 "hmac_configured": bool(HMAC_KEY),
-                "events_stored": count,
-                "store": os.path.abspath(STORE),
+                "classifier": "on" if CLASSIFY_ON else "off",
+                "records_stored": count,
             })
+        if path == "/ring/webhook":
+            # Registration flows often probe the URL with a GET before they
+            # will accept it. Answer the probe; POST still requires a valid
+            # HMAC signature and is unaffected by this.
+            return self._json(200, {"ok": True, "endpoint": "ring-webhook",
+                                    "accepts": ["POST"]})
         return self._json(404, {"error": "not found"})
 
     def do_POST(self):
