@@ -129,6 +129,61 @@ frame are part of the API contract.
 
 ---
 
+## 8. The signing key is issued base64-encoded; the encoding used for the HMAC isn't stated
+
+The HMAC Signature Key arrives base64-encoded (32 bytes, trailing `=`). The docs don't
+say whether the HMAC is computed over the **decoded bytes** or over the **base64 string
+itself**.
+
+That's a coin flip in a security-critical path. Guess wrong and every delivery fails
+with "signature verification failed" and no indication why — and the natural next move
+is to assume the key is wrong and regenerate it, which changes nothing.
+
+Our receiver now tries both and records which one verified.
+
+**Suggested fix:** one sentence in the reference, plus a worked example: key, body,
+resulting hex digest. Signature verification is the one place where a worked example is
+worth more than a paragraph of prose.
+
+---
+
+## 9. It isn't clear which direction the issued credentials authenticate
+
+App creation issues a client ID and a client secret. Account linking then asks for a
+**Token Exchange URL** — meaning Ring calls *our* token endpoint, so Ring is the OAuth
+client and our service is the authorization server.
+
+So: are the issued client ID and secret the credentials **Ring presents to us**, or the
+ones **we present to Ring** when calling the Partner API? Both readings are plausible,
+they lead to opposite implementations, and the console says neither.
+
+We built for the first reading and log whatever client_id actually arrives, so a real
+request will settle it.
+
+**Suggested fix:** label the credentials on the console page with their direction —
+"Ring will present these to your token endpoint" or "use these when calling the Ring
+API." One clause each.
+
+---
+
+## 10. The account-linking model is the reverse of what most integrators will assume
+
+Most partner APIs make the integrator the OAuth client: you get a token from the
+platform and call their API with it. Ring's account linking inverts this — **you** run
+the authorization server, **Ring** gets a token from you, and Ring presents that token
+when calling your webhook.
+
+This is a perfectly reasonable design, and in hindsight it explains why the official
+sample checks webhooks with a bearer token. But nothing in the docs flags the inversion,
+and we built the consumer half of the flow before the Account Linking form made the
+direction obvious.
+
+**Suggested fix:** a one-paragraph "who is the client?" note at the top of the account
+linking docs, with a two-box diagram. It would save every first-time integrator the
+same wrong turn.
+
+---
+
 ## What worked well
 
 - **The Developers Playground is excellent.** One-click 30-minute tokens with no app
