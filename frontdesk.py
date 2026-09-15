@@ -32,9 +32,12 @@ import json
 import logging
 import os
 import queue
+import secrets
 import sys
 import tempfile
 import threading
+import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -160,6 +163,77 @@ def is_ring_shaped(body: dict) -> bool:
         and isinstance(body["data"].get("attributes"), dict)
         and "source" in body["data"]["attributes"]
     )
+
+
+# ---------------------------------------------------------------- oauth
+
+# Account linking uses the OAuth authorization-code flow. The redirect URI must
+# be public HTTPS, which is what the tunnel gives us. Tokens are written to a
+# gitignored file, never to the repo and never logged.
+#
+# UNVERIFIED: the token endpoint path. RING_OAUTH_BASE/RING_TOKEN_PATH are
+# overridable so a docs correction is a config change, not a code change.
+
+CLIENT_ID = os.environ.get("RING_CLIENT_ID", "")
+CLIENT_SECRET = os.environ.get("RING_CLIENT_SECRET", "")
+OAUTH_BASE = os.environ.get("RING_OAUTH_BASE", "https://oauth.ring.com")
+AUTH_PATH = os.environ.get("RING_AUTH_PATH", "/authorize")
+TOKEN_PATH = os.environ.get("RING_TOKEN_PATH", "/token")
+REDIRECT_URI = os.environ.get(
+    "RING_REDIRECT_URI", "https://frontdesk.quantcity.org/oauth/callback")
+SCOPES = os.environ.get("RING_SCOPES", "ava.v1:read")
+TOKEN_FILE = os.environ.get("RING_TOKEN_FILE",
+                            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                         ".tokens.json"))
+
+_states = set()
+
+
+def auth_url():
+    state = secrets.token_urlsafe(24)
+    _states.add(state)
+    q = urllib.parse.urlencode({
+        "client_id": CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": REDIRECT_URI,
+        "scope": SCOPES,
+        "state": state,
+    })
+    return f"{OAUTH_BASE}{AUTH_PATH}?{q}"
+
+
+def exchange_code(code):
+    """Trade an authorization code for tokens. Returns (payload, error)."""
+    if not (CLIENT_ID and CLIENT_SECRET):
+        return None, "RING_CLIENT_ID / RING_CLIENT_SECRET not configured"
+    data = urllib.parse.urlencode({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": REDIRECT_URI,
+    }).encode()
+    basic = base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
+    req = urllib.request.Request(
+        f"{OAUTH_BASE}{TOKEN_PATH}", data=data, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded",
+                 "Authorization": f"Basic {basic}"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read()), None
+    except urllib.error.HTTPError as e:
+        return None, f"token exchange HTTP {e.code}: {e.read()[:300].decode(errors='replace')}"
+    except Exception as e:                      # noqa: BLE001
+        return None, f"token exchange failed: {e}"
+
+
+def save_tokens(payload):
+    payload = dict(payload)
+    payload["obtained_at"] = datetime.now(timezone.utc).isoformat()
+    with open(TOKEN_FILE, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+    try:
+        os.chmod(TOKEN_FILE, 0o600)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------- pipeline
@@ -303,6 +377,38 @@ class Handler(BaseHTTPRequestHandler):
             # HMAC signature and is unaffected by this.
             return self._json(200, {"ok": True, "endpoint": "ring-webhook",
                                     "accepts": ["POST"]})
+        if path == "/oauth/start":
+            if not CLIENT_ID:
+                return self._json(500, {"error": "RING_CLIENT_ID not configured"})
+            url = auth_url()
+            self.send_response(302)
+            self.send_header("Location", url)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
+        if path == "/oauth/callback":
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]
+                                       if "?" in self.path else "")
+            if qs.get("error"):
+                log.warning("oauth denied: %s", qs.get("error")[0])
+                return self._json(400, {"error": qs.get("error")[0]})
+            code = (qs.get("code") or [""])[0]
+            state = (qs.get("state") or [""])[0]
+            if not code:
+                return self._json(400, {"error": "no code in callback"})
+            if state not in _states:
+                log.warning("oauth state mismatch - possible CSRF, refusing")
+                return self._json(400, {"error": "state mismatch"})
+            _states.discard(state)
+            payload, err = exchange_code(code)
+            if err:
+                log.error("oauth exchange failed: %s", err)
+                return self._json(502, {"error": err})
+            save_tokens(payload)
+            # Never log or return the tokens themselves.
+            log.info("account linked: token stored (%s)",
+                     ", ".join(sorted(k for k in payload if "token" not in k.lower())))
+            return self._json(200, {"ok": True, "linked": True})
         return self._json(404, {"error": "not found"})
 
     def do_POST(self):
