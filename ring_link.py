@@ -55,6 +55,13 @@ TOKENS_FILE = os.environ.get(
 
 NONCE_WINDOW_S = 600
 
+# Cloudflare sits in front of oauth.ring.com and rejects Python's default
+# User-Agent with error 1010. Overridable in case the fingerprinting changes.
+USER_AGENT = os.environ.get(
+    "RING_USER_AGENT",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/140.0.0.0 Safari/537.36")
+
 
 # ------------------------------------------------------------------ storage
 
@@ -144,6 +151,11 @@ def _json_req(url, method, payload=None, bearer=None):
 
 
 def _send(req):
+    # Cloudflare fronts oauth.ring.com and returns 1010 ("owner has banned your
+    # browser") to Python's default User-Agent. Send a real one on every
+    # outbound call to Ring or nothing gets through.
+    req.add_header("User-Agent", USER_AGENT)
+    req.add_header("Accept", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             raw = resp.read()
