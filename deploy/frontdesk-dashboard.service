@@ -1,0 +1,26 @@
+[Unit]
+Description=Front Desk lobby dashboard (Fire TV surface) on :8313 - LAN only
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=banksiai
+Group=banksiai
+WorkingDirectory=/opt/banksy/front-desk
+EnvironmentFile=/opt/banksy/front-desk/.env
+ExecStart=/opt/banksy/front-desk/.venv/bin/python -u dashboard.py
+Restart=always
+RestartSec=5
+
+StandardOutput=append:/opt/banksy/front-desk/logs/dashboard.log
+StandardError=append:/opt/banksy/front-desk/logs/dashboard.log
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/banksy/front-desk/logs
+
+[Install]
+WantedBy=multi-user.target

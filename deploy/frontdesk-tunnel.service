@@ -1,0 +1,26 @@
+[Unit]
+Description=Cloudflare tunnel for frontdesk.quantcity.org -> 127.0.0.1:8310
+After=network-online.target frontdesk-receiver.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=banksiai
+Group=banksiai
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate \
+  --config /opt/banksy/front-desk/deploy/cloudflared/config.yml \
+  tunnel run frontdesk
+Restart=always
+RestartSec=5
+
+StandardOutput=append:/opt/banksy/front-desk/logs/tunnel.log
+StandardError=append:/opt/banksy/front-desk/logs/tunnel.log
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/banksy/front-desk/logs
+
+[Install]
+WantedBy=multi-user.target
