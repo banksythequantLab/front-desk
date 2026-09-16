@@ -26,6 +26,7 @@ Env:
 
 import base64
 import binascii
+import html
 import hashlib
 import hmac
 import json
@@ -41,7 +42,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import oauth_provider as oap
+import link_pages
+import ring_link
 
 # ---------------------------------------------------------------- config
 
@@ -50,15 +52,12 @@ BEARER = os.environ.get("FRONTDESK_BEARER", "")
 STORE = os.environ.get("FRONTDESK_STORE", "front_desk_events.jsonl")
 PORT = int(os.environ.get("FRONTDESK_PORT", "8310"))
 
-# UNVERIFIED: the exact header Ring signs with is not stated in the public
-# docs we could reach. We accept any of these and record which one matched,
-# so the first real delivery tells us the answer. Override via env once known.
-SIG_HEADER_CANDIDATES = [
-    "X-Ring-Signature",
-    "X-Amz-Vision-Signature",
-    "X-Signature",
-    "X-Hub-Signature-256",
-]
+# Confirmed against Ring's knowledge base (amazon_vision_api/notifications.md):
+# header is X-Signature, value is "sha256=<lowercase hex>", and the signing key
+# is used as UTF-8 bytes -- explicitly NOT base64-decoded. The base64 variant is
+# still attempted as a fallback and logged, so a docs change surfaces loudly
+# rather than silently rejecting every delivery.
+SIG_HEADER_CANDIDATES = ["X-Signature", "X-Ring-Signature", "X-Hub-Signature-256"]
 if os.environ.get("FRONTDESK_SIG_HEADER"):
     SIG_HEADER_CANDIDATES.insert(0, os.environ["FRONTDESK_SIG_HEADER"])
 
@@ -170,23 +169,6 @@ def is_ring_shaped(body: dict) -> bool:
 # Provider side lives in oauth_provider.py. Ring is the CLIENT; we are the
 # authorization server. See the direction note in that module.
 
-CONSENT_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Link Front Desk</title><style>
-body{{background:#0b1019;color:#f0f4fa;font-family:"Segoe UI",system-ui,sans-serif;
-display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}}
-.card{{border:2px solid #26344a;border-radius:16px;padding:44px;max-width:460px}}
-h1{{font-size:26px;margin:0 0 10px}} p{{color:#8a9ab0;line-height:1.55}}
-code{{color:#40c4a8}}
-a.btn{{display:inline-block;margin-top:26px;background:#40c4a8;color:#0b1019;
-text-decoration:none;font-weight:700;padding:14px 30px;border-radius:10px}}
-</style></head><body><div class="card">
-<h1>Link your Ring account</h1>
-<p>Front Desk will receive door events from Ring and classify them on hardware
-you control. Requested access: <code>{scope}</code></p>
-<p>Images are processed locally and are never sent to a cloud AI service.</p>
-<a class="btn" href="{href}">Allow</a>
-</div></body></html>"""
 # ---------------------------------------------------------------- pipeline
 
 # Classification takes seconds; Ring retries on non-2xx. So the webhook ACKS
@@ -308,6 +290,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _html(self, code: int, page: str):
+        body = page.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/health":
@@ -329,65 +320,98 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "endpoint": "ring-webhook",
                                     "accepts": ["POST"]})
         if path == "/oauth/authorize":
-            # Ring sends the user here to link their account. Private app with a
-            # single operator, so this is a confirm page rather than a login.
+            # Ring's Account Link URL. Ring sends nonce + time; we show a
+            # sign-in form. Ring mandates the sign-in: the authenticated
+            # identity is what claims the token.
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
-            redirect_uri = (qs.get("redirect_uri") or [""])[0]
-            state = (qs.get("state") or [""])[0]
-            scope = (qs.get("scope") or ["ava.v1:read"])[0]
-            client_id = (qs.get("client_id") or [""])[0]
-            log.info("authorize request client_id=%s redirect_uri=%s scope=%s",
-                     client_id or "(none)", redirect_uri or "(none)", scope)
-            if not redirect_uri.startswith("https://"):
-                return self._json(400, {"error": "invalid_request",
-                                        "detail": "redirect_uri must be absolute https"})
-            if self.path.find("confirm=1") == -1:
-                page = CONSENT_PAGE.format(
-                    scope=scope,
-                    href=self.path + ("&" if "?" in self.path else "?") + "confirm=1")
-                body = page.encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return None
-            code = oap.issue_code(redirect_uri, scope)
-            target = oap.build_redirect(redirect_uri, code, state)
-            log.info("authorize granted, redirecting back to client")
-            self.send_response(302)
-            self.send_header("Location", target)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return None
+            nonce = (qs.get("nonce") or [""])[0]
+            tstamp = (qs.get("time") or [""])[0]
+            log.info("account link opened nonce=%s time=%s",
+                     "present" if nonce else "MISSING", tstamp or "MISSING")
+            if not nonce or not tstamp:
+                return self._html(400, link_pages.RESULT_PAGE.format(
+                    title="Bad link", color="#e8a850",
+                    body="This link is missing its nonce or timestamp. Start "
+                         "again from the Ring app."))
+            fresh, why = ring_link.nonce_is_fresh(tstamp)
+            if not fresh:
+                log.warning("stale account link: %s", why)
+                return self._html(400, link_pages.RESULT_PAGE.format(
+                    title="Link expired", color="#e8a850",
+                    body=f"{why}. Ring links are valid for 10 minutes — "
+                         "start again from the Ring app."))
+            return self._html(200, link_pages.SIGNIN_PAGE.format(
+                nonce=html.escape(nonce), time=html.escape(tstamp), error=""))
         return self._json(404, {"error": "not found"})
 
     def do_POST(self):
         path = self.path.split("?")[0]
 
         if path == "/oauth/token":
-            # Ring exchanges an authorization code for an access token here.
+            # Ring's Token Exchange URL. Ring POSTs us an authorization code;
+            # WE redeem it at Ring's own token endpoint. We are not an OAuth
+            # server — see the direction note in ring_link.py.
             length = int(self.headers.get("Content-Length") or 0)
             if length <= 0 or length > 64 * 1024:
                 return self._json(400, {"error": "invalid_request"})
             form = urllib.parse.parse_qs(self.rfile.read(length).decode(errors="replace"))
-            grant_type = form.get("grant_type", [""])[0]
-            cid, csec = oap.client_from_request(self.headers, form)
-            ok, why = oap.check_client(cid, csec)
-            if not ok:
-                log.warning("token request rejected: %s (client_id=%s)", why, cid or "(none)")
-                return self._json(401, {"error": "invalid_client"})
-            if grant_type != "authorization_code":
-                log.warning("unsupported grant_type=%s", grant_type)
-                return self._json(400, {"error": "unsupported_grant_type"})
             code = form.get("code", [""])[0]
-            rec, err = oap.redeem_code(code, form.get("redirect_uri", [""])[0])
+            if not code:
+                log.warning("token exchange called with no code")
+                return self._json(400, {"error": "missing code"})
+            account_id, err = ring_link.redeem_code(code)
             if err:
-                log.warning("token exchange failed: %s", err)
-                return self._json(400, {"error": "invalid_grant"})
-            tok = oap.issue_token(rec["scope"])
-            log.info("access token issued scope=%s ttl=%ss", rec["scope"], tok["expires_in"])
-            return self._json(200, tok)          # the only place a token is returned
+                log.error("code redemption failed: %s", err)
+                return self._json(502, {"error": "exchange_failed"})
+            log.info("token parked unclaimed for account %s", account_id)
+            return self._json(200, {"ok": True})
+
+        if path == "/oauth/authorize":
+            # Sign-in submitted. Authenticate, match the nonce, claim, confirm.
+            length = int(self.headers.get("Content-Length") or 0)
+            form = urllib.parse.parse_qs(
+                self.rfile.read(max(0, min(length, 64 * 1024))).decode(errors="replace"))
+            nonce = form.get("nonce", [""])[0]
+            tstamp = form.get("time", [""])[0]
+            user = form.get("username", [""])[0]
+            pw = form.get("password", [""])[0]
+
+            def again(msg):
+                return self._html(200, link_pages.SIGNIN_PAGE.format(
+                    nonce=html.escape(nonce), time=html.escape(tstamp),
+                    error=f'<div class="err">{html.escape(msg)}</div>'))
+
+            fresh, why = ring_link.nonce_is_fresh(tstamp)
+            if not fresh:
+                return self._html(400, link_pages.RESULT_PAGE.format(
+                    title="Link expired", color="#e8a850", body=why))
+
+            ok, why = ring_link.check_password(user, pw)
+            if not ok:
+                log.warning("sign-in rejected: %s", why)
+                return again("Sign-in failed.")
+
+            account_id, rec = ring_link.match_nonce(nonce, tstamp)
+            if not account_id:
+                log.warning("nonce matched no unclaimed token")
+                return self._html(400, link_pages.RESULT_PAGE.format(
+                    title="Nothing to link", color="#e8a850",
+                    body="No pending Ring authorisation matched this link. "
+                         "Ring sends credentials to this service before "
+                         "redirecting you — if that has not happened yet, "
+                         "start again from the Ring app."))
+
+            ok, why = ring_link.claim_and_confirm(account_id, rec, nonce, user)
+            if not ok:
+                log.error("confirmation failed: %s", why)
+                return self._html(502, link_pages.RESULT_PAGE.format(
+                    title="Could not confirm", color="#e8a850", body=why))
+
+            log.info("ACCOUNT LINKED: %s", account_id)
+            return self._html(200, link_pages.RESULT_PAGE.format(
+                title="Account linked", color="#40c4a8",
+                body="Front Desk is connected to Ring. Door events will now "
+                     "arrive and be classified on your own hardware."))
 
         if path != "/ring/webhook":
             return self._json(404, {"error": "not found"})
