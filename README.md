@@ -111,11 +111,29 @@ prompt tokens and 17.1s, versus 1,159 tokens and 5.8s. The cap is 1280 rather th
 because small-feature detail starts disappearing at 1024 — and envelope-versus-parcel is
 exactly a small-feature distinction.
 
+## Measured accuracy
+
+17 real doorstep frames, local Qwen3-VL-30B-A3B: **15/17 (88%)**, median 4.1s per frame.
+Full write-up in [EVALUATION.md](EVALUATION.md).
+
+Both failures are the same case — a postal carrier in plain clothes holding letters, with
+no truck, bag or logo in frame — and both are **false alarms, never misses**. The system
+flags a mail carrier for review rather than letting a possible service of process pass. For
+a law office that is the correct direction to fail in.
+
+That case is also not fixable by prompt tuning: a person in a t-shirt holding papers at a
+door looks the same whether they are a mail carrier or a process server, and the
+distinguishing evidence is not in the frame. The answer is more context — the marked
+vehicle from the previous frame, arrival history — not a better prompt.
+
+`possible_service` recall is **unmeasured**: the set contains no positive examples of the
+class the product exists for.
+
 ## Honest status
 
-- The classifier's **accuracy is not yet measured**. The pipeline is proven end to end;
-  the hard case — manila envelope versus small box, at night, through Ring's watermark —
-  needs a real evaluation set.
+- **`possible_service` recall is unmeasured.** 88% overall on 17 frames, but the set has
+  no positive examples of the class the product exists for. False-alarm behaviour is
+  characterised; miss behaviour is not.
 - Since 2026-06-08 every frame Ring returns carries an unremovable server-side watermark.
   `classifier/watermark.py` simulates it so the eval set matches production, but the
   simulation is an approximation until measured against a real watermarked frame.

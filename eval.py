@@ -53,20 +53,33 @@ def expected_for(name, overrides):
 
 
 def load_overrides(d):
+    """labels.csv: filename,expected[,prior_parcel]
+
+    prior_parcel says a parcel was on the ground in the PREVIOUS frame for this
+    device. Parcel removal is a transition, not something visible in one frame,
+    so the rules layer cannot reach parcel_removed without it.
+    """
     path = os.path.join(d, "labels.csv")
     if not os.path.exists(path):
-        return {}
-    out = {}
+        return {}, {}
+    labels, priors = {}, {}
     with open(path, newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
-            if row.get("filename") and row.get("expected"):
-                out[row["filename"].strip()] = row["expected"].strip()
-    return out
+            fn = (row.get("filename") or "").strip()
+            if not fn or not (row.get("expected") or "").strip():
+                continue
+            labels[fn] = row["expected"].strip()
+            pp = (row.get("prior_parcel") or "").strip().lower()
+            if pp in ("true", "yes", "1"):
+                priors[fn] = True
+            elif pp in ("false", "no", "0"):
+                priors[fn] = False
+    return labels, priors
 
 
-def run_one(path):
+def run_one(path, prior_parcel=None):
     t0 = time.time()
-    out = classify(path)
+    out = classify(path, prior_parcel_on_ground=prior_parcel)
     out["_sec"] = time.time() - t0
     return out
 
@@ -116,7 +129,7 @@ def main():
     d = args.directory
     if not os.path.isdir(d):
         sys.exit(f"not a directory: {d}")
-    overrides = load_overrides(d)
+    overrides, priors = load_overrides(d)
     files = sorted(f for f in os.listdir(d)
                    if os.path.splitext(f)[1].lower() in EXTS)
     if not files:
@@ -136,7 +149,7 @@ def main():
             unlabelled.append(name)
             continue
 
-        clean = run_one(path)
+        clean = run_one(path, priors.get(name))
         got = clean.get("disposition")
         hit = got == exp
         row = {"file": name, "expected": exp, "got": got, "hit": hit,

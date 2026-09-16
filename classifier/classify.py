@@ -59,6 +59,18 @@ If something is not clearly visible, use null. Do not invent detail.
 Ignore any text overlay in the corners of the image: that is a camera
 watermark, not part of the scene.
 
+For "wearing_delivery_uniform", answer true for ANY work attire or courier
+marking, not just a full uniform. That includes: a logo cap or visor, a polo or
+t-shirt with a company logo or wordmark, a safety or high-visibility vest,
+cargo shorts with a matching work shirt, a courier satchel or mail bag worn on
+the body, or a scanner/handheld device on a lanyard. Postal and courier staff
+often wear plain-looking shirts and shorts; the cap, bag, vest or logo is the
+signal.
+
+For "delivery_vehicle_visible", answer true only for a marked delivery or
+postal vehicle (van, truck, or car with visible courier branding). An ordinary
+parked car is not one.
+
 Answer with a single JSON object and nothing else. No prose, no markdown:
 
 {
@@ -68,6 +80,8 @@ Answer with a single JSON object and nothing else. No prose, no markdown:
   "holding_flat_envelope_or_papers": <true|false|null>,
   "holding_parcel_or_box": <true|false|null>,
   "wearing_delivery_uniform": <true|false|null>,
+  "carrying_courier_bag_or_scanner": <true|false|null>,
+  "delivery_vehicle_visible": <true|false|null>,
   "parcel_on_ground": <true|false|null>,
   "vehicle_visible": <true|false|null>,
   "lighting": "<daylight|low_light|night_ir|null>",
@@ -78,7 +92,8 @@ Answer with a single JSON object and nothing else. No prose, no markdown:
 REQUIRED_KEYS = [
     "person_count", "person_visible", "facing_door",
     "holding_flat_envelope_or_papers", "holding_parcel_or_box",
-    "wearing_delivery_uniform", "parcel_on_ground", "vehicle_visible",
+    "wearing_delivery_uniform", "carrying_courier_bag_or_scanner",
+    "delivery_vehicle_visible", "parcel_on_ground", "vehicle_visible",
     "lighting", "image_quality", "notes",
 ]
 
@@ -189,20 +204,29 @@ def decide(obs, prior_parcel_on_ground=None):
     papers = _true(obs.get("holding_flat_envelope_or_papers"))
     parcel = _true(obs.get("holding_parcel_or_box"))
     uniform = _true(obs.get("wearing_delivery_uniform"))
+    courier_kit = _true(obs.get("carrying_courier_bag_or_scanner"))
+    delivery_vehicle = _true(obs.get("delivery_vehicle_visible"))
     facing = _true(obs.get("facing_door"))
+
+    # Any one of these marks a courier. Measured against a real set, uniform
+    # alone was not enough: a postal carrier in a plain t-shirt and cap holding
+    # letters is visually identical to a process server holding papers, and the
+    # model would not call the shirt a uniform. The bag, the scanner and the
+    # marked vehicle are the signals that survive.
+    courier = uniform or courier_kit or delivery_vehicle
 
     # Removal is a transition: parcel was there, now it is not, person present.
     if prior_parcel_on_ground is True and obs.get("parcel_on_ground") is False:
         return {"disposition": "parcel_removed", "escalate": True,
                 "why": "parcel present in prior frame, absent now, person on step"}
 
-    if parcel or uniform:
+    if parcel or courier:
         return {"disposition": "delivery", "escalate": False,
-                "why": "carrying a parcel or in delivery uniform"}
+                "why": "carrying a parcel, or marked as a courier"}
 
-    if papers and facing and not uniform:
+    if papers and facing and not courier:
         return {"disposition": "possible_service", "escalate": True,
-                "why": "person at door holding flat envelope or papers, no delivery uniform"}
+                "why": "person at door holding flat envelope or papers, no courier markings"}
 
     if facing:
         return {"disposition": "visitor", "escalate": True,
