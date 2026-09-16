@@ -68,6 +68,20 @@ check("wrong username rejected", not ring_link.check_password("mallory", PW)[0])
 check("hash is pbkdf2 with a random salt",
       h.startswith("pbkdf2_sha256$") and h != ring_link.make_password_hash(PW))
 
+# Ring emails this value to the Ring user, so it must be masked, not raw.
+# A 2-char local part masks to one char: showing "d***j" for "dj" would reveal
+# the whole local part, which is not masking.
+m = ring_link.mask_identifier("dj@soltis.info")
+check("short local part fully masked", m == "d***@soltis.info", m)
+check("longer local part keeps first and last",
+      ring_link.mask_identifier("derek@soltis.info") == "d***k@soltis.info")
+check("non-email identifier masked",
+      ring_link.mask_identifier("derek") == "d***k")
+check("empty identifier stays empty", ring_link.mask_identifier("") == "")
+check("mask keeps the domain intact", m.endswith("@soltis.info"))
+check("mask never leaks the full local part",
+      "dj@" not in m and "derek@" not in ring_link.mask_identifier("derek@x.com"))
+
 # Seed an unclaimed token and prove the nonce binds to exactly that account.
 with open(TOKENS, "w", encoding="utf-8") as fh:
     json.dump({"unclaimed": {acct: {"access_token": "tok_abc"}}, "claimed": {}}, fh)

@@ -224,21 +224,46 @@ def make_password_hash(password, iters=310000):
 
 # ------------------------------------------------------------------ steps 4-5
 
+def mask_identifier(identifier):
+    """Obfuscate the signed-in identity before sending it to Ring.
+
+    Ring displays this value to the Ring user in a confirmation email, and the
+    docs specify a masked form (their example: u***r@partner.example.com). It
+    still has to be derived from the real signed-in session — this masks it,
+    it does not invent one.
+    """
+    ident = (identifier or "").strip()
+    if not ident:
+        return ""
+    if "@" in ident:
+        local, _, domain = ident.partition("@")
+        if len(local) <= 2:
+            return f"{local[:1]}***@{domain}"
+        return f"{local[0]}***{local[-1]}@{domain}"
+    if len(ident) <= 2:
+        return f"{ident[:1]}***"
+    return f"{ident[0]}***{ident[-1]}"
+
+
 def claim_and_confirm(account_id, rec, nonce, account_identifier):
     """Claim the matched token, then POST + PATCH app-integrations.
 
-    The PATCH is mandatory: without it the integration never becomes
-    operational, whatever the POST returned.
+    The PATCH is mandatory: the integration sits in `awaiting` and is not
+    operational until it lands, whatever the POST returned.
     """
     access = rec.get("access_token")
     url = f"{AVA_BASE}/v1/accounts/me/app-integrations"
+    masked = mask_identifier(account_identifier)
 
-    _, err = _json_req(url, "POST", {
+    # Pass the nonce exactly as received — do not decode or re-encode it.
+    body, err = _json_req(url, "POST", {
         "nonce": nonce,
-        "account_identifier": account_identifier,
+        "account_identifier": masked,
     }, bearer=access)
     if err:
         return False, f"app-integrations POST failed: {err}"
+    if (body or {}).get("status") and body["status"] != "awaiting":
+        return False, f"unexpected POST status: {body['status']}"
 
     _, err = _json_req(url, "PATCH", {"status": "completed"}, bearer=access)
     if err:
@@ -246,7 +271,7 @@ def claim_and_confirm(account_id, rec, nonce, account_identifier):
 
     d = _load()
     claimed = d["unclaimed"].pop(account_id, rec)
-    claimed["account_identifier"] = account_identifier
+    claimed["account_identifier"] = masked
     claimed["claimed_at"] = int(time.time())
     d["claimed"][account_id] = claimed
     _save(d)
