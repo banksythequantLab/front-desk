@@ -26,14 +26,23 @@ import os
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
-from mcp.server.fastmcp import FastMCP
+# The SDK renamed FastMCP to MCPServer in mcp 2.x and moved transport options
+# from a .settings object into run() kwargs. Support both so the same file runs
+# on a 1.x dev box and a 2.x appliance.
+try:
+    from mcp.server.mcpserver import MCPServer as _Server
+    _MCP2 = True
+except ModuleNotFoundError:
+    from mcp.server.fastmcp import FastMCP as _Server
+    _MCP2 = False
 
 from store import load_events
 
 STORE = os.environ.get("FRONTDESK_STORE", "front_desk_events.jsonl")
 PORT = int(os.environ.get("FD_MCP_PORT", "8311"))
+BIND = os.environ.get("FD_MCP_BIND", "0.0.0.0")
 
-mcp = FastMCP("front-desk")
+mcp = _Server("front-desk")
 
 # Fields safe to surface to a voice assistant. thumbnail_url, bounding_box and
 # raw are intentionally absent.
@@ -172,8 +181,12 @@ def store_status() -> dict:
 
 
 if __name__ == "__main__":
-    mcp.settings.port = PORT
-    mcp.settings.host = "0.0.0.0"
-    mcp.settings.stateless_http = True
-    mcp.settings.json_response = True
-    mcp.run(transport="streamable-http")
+    if _MCP2:
+        mcp.run(transport="streamable-http", host=BIND, port=PORT,
+                stateless_http=True, json_response=True)
+    else:
+        mcp.settings.host = BIND
+        mcp.settings.port = PORT
+        mcp.settings.stateless_http = True
+        mcp.settings.json_response = True
+        mcp.run(transport="streamable-http")
