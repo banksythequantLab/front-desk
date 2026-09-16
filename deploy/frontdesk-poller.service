@@ -1,0 +1,26 @@
+[Unit]
+Description=Front Desk event poller (Ring Event History API)
+After=network-online.target frontdesk-vlm.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=banksiai
+Group=banksiai
+WorkingDirectory=/opt/banksy/front-desk
+EnvironmentFile=/opt/banksy/front-desk/.env
+ExecStart=/opt/banksy/front-desk/.venv/bin/python -u poller.py
+Restart=always
+RestartSec=15
+
+StandardOutput=append:/opt/banksy/front-desk/logs/poller.log
+StandardError=append:/opt/banksy/front-desk/logs/poller.log
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/banksy/front-desk/data /opt/banksy/front-desk/logs
+
+[Install]
+WantedBy=multi-user.target
