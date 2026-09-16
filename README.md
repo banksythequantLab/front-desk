@@ -113,27 +113,25 @@ exactly a small-feature distinction.
 
 ## Measured accuracy
 
-17 real doorstep frames, local Qwen3-VL-30B-A3B: **15/17 (88%)**, median 4.1s per frame.
-Full write-up in [EVALUATION.md](EVALUATION.md).
+20 real doorstep frames, local Qwen3-VL-30B-A3B: **18/20 (90%)**, median 4.2s per frame.
+**`possible_service` recall 3/3 — zero misses.** Full write-up in [EVALUATION.md](EVALUATION.md).
 
 Both failures are the same case — a postal carrier in plain clothes holding letters, with
 no truck, bag or logo in frame — and both are **false alarms, never misses**. The system
-flags a mail carrier for review rather than letting a possible service of process pass. For
-a law office that is the correct direction to fail in.
+flags a mail carrier for review rather than letting a possible service of process pass. A
+false alarm costs ten seconds of attention; a miss costs a deadline that started running
+without anyone knowing.
 
 That case is also not fixable by prompt tuning: a person in a t-shirt holding papers at a
 door looks the same whether they are a mail carrier or a process server, and the
 distinguishing evidence is not in the frame. The answer is more context — the marked
 vehicle from the previous frame, arrival history — not a better prompt.
 
-`possible_service` recall is **unmeasured**: the set contains no positive examples of the
-class the product exists for.
-
 ## Honest status
 
-- **`possible_service` recall is unmeasured.** 88% overall on 17 frames, but the set has
-  no positive examples of the class the product exists for. False-alarm behaviour is
-  characterised; miss behaviour is not.
+- **20 frames is a small set.** 90% with 3/3 recall shows the path works end to end; it
+  does not bound recall with any confidence. More `possible_service` examples, and night
+  and IR frames, are the next measurement.
 - Since 2026-06-08 every frame Ring returns carries an unremovable server-side watermark.
   `classifier/watermark.py` simulates it so the eval set matches production, but the
   simulation is an approximation until measured against a real watermarked frame.

@@ -1,22 +1,36 @@
 # Evaluation — first measured run
 
-17 real doorstep frames, classified on a local Qwen3-VL-30B-A3B via llama.cpp/Vulkan.
+20 real doorstep frames, classified on a local Qwen3-VL-30B-A3B via llama.cpp/Vulkan.
 Dispositions come from the deterministic rules layer; the model is only ever asked for
 observables.
 
 ```
-accuracy            15/17   (88%)
-latency             median 4.1s   max 4.2s
+accuracy            18/20   (90%)
+possible_service    3/3     (recall - zero misses)
+latency             median 4.2s   max 5.6s
 ```
 
 | expected | n | correct |
 |---|---|---|
 | delivery | 11 | 9 |
+| **possible_service** | **3** | **3** |
 | no_person | 2 | 2 |
 | visitor | 2 | 2 |
 | passerby | 1 | 1 |
 | parcel_removed | 1 | 1 |
-| **possible_service** | **0** | **— untested** |
+
+## Zero misses
+
+Every error in this run is a false alarm. `possible_service` recall is 3/3 — nothing that
+should have been flagged for review went unflagged.
+
+That asymmetry is the point. A false alarm costs a lawyer ten seconds of attention. A miss
+costs a deadline that started running without anyone knowing. The rules layer is built to
+fail in the first direction, and on this set it does.
+
+It is also not indiscriminate: nine deliveries, two visitors, a passerby, two empty frames
+and a resident retrieving a package all classified correctly. The system discriminates, and
+where it is wrong it is wrong toward caution.
 
 ## The two failures are the same failure
 
@@ -67,10 +81,9 @@ classifier would have raised a false alarm on one of the most common events at a
 
 ## Known gaps
 
-- **No `possible_service` examples.** The class the product exists for has zero positive
-  cases, so recall on it is unmeasured. False-alarm behaviour is characterised; miss
-  behaviour is not.
-- **17 frames is small.** Every number here has wide error bars.
+- **20 frames is small.** Every number here has wide error bars. Three positive
+  `possible_service` examples is enough to show the path works end to end, not enough to
+  bound recall with any confidence.
 - **No watermarked comparison yet.** `--compare` runs each frame clean and
   watermark-stamped, but the stamp is a simulation of Ring's overlay, not the real thing.
 - **Daylight-heavy.** Two night frames, no IR frames.
