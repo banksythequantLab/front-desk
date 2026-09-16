@@ -278,12 +278,63 @@ def claim_and_confirm(account_id, rec, nonce, account_identifier):
     return True, ""
 
 
-def access_token():
-    """The token to call Ring's API with, if we have one."""
+def refresh_access_token(account_id, rec):
+    """Trade the refresh token for a new access token.
+
+    Access tokens last 14,400s (4 hours). Without this the link goes dead
+    mid-demo and there is no recovery path short of re-linking. Credentials go
+    in the form body, matching Ring's own sample (lib/auth.ts).
+    """
+    refresh = rec.get("refresh_token")
+    if not refresh:
+        return None, "no refresh token stored for this account"
+    if not (CLIENT_ID and CLIENT_SECRET):
+        return None, "client credentials not configured"
+
+    tokens, err = _post_form(OAUTH_TOKEN_URL, {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh,
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+    })
+    if err:
+        return None, f"refresh failed: {err}"
+    access = tokens.get("access_token")
+    if not access:
+        return None, "refresh response contained no access_token"
+
     d = _load()
-    for rec in d["claimed"].values():
-        if rec.get("access_token"):
-            return rec["access_token"]
+    slot = "claimed" if account_id in d["claimed"] else "unclaimed"
+    cur = d[slot].get(account_id, dict(rec))
+    cur["access_token"] = access
+    # Ring may rotate the refresh token; keep the new one if it sends one.
+    if tokens.get("refresh_token"):
+        cur["refresh_token"] = tokens["refresh_token"]
+    cur["expires_in"] = tokens.get("expires_in")
+    cur["refreshed_at"] = int(time.time())
+    d[slot][account_id] = cur
+    _save(d)
+    return access, None
+
+
+def access_token(auto_refresh=True):
+    """A usable access token for Ring's API, refreshing if it is near expiry.
+
+    Renews 60s early, the same margin Ring's sample uses.
+    """
+    d = _load()
+    for account_id, rec in d["claimed"].items():
+        if not rec.get("access_token"):
+            continue
+        issued = rec.get("refreshed_at") or rec.get("received_at") or 0
+        ttl = rec.get("expires_in") or 0
+        if auto_refresh and ttl and time.time() > (issued + ttl - 60):
+            new, err = refresh_access_token(account_id, rec)
+            if new:
+                return new
+            # Fall through and hand back the old one — it may still work, and
+            # the caller's 401 is a clearer signal than None.
+        return rec["access_token"]
     return None
 
 

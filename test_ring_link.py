@@ -91,6 +91,28 @@ check("wrong nonce matches nothing", ring_link.match_nonce("xxxx", ts)[0] is Non
 check("right nonce, wrong time matches nothing",
       ring_link.match_nonce(n, ts + 1)[0] is None)
 
+# Access tokens last 4 hours. Without refresh the link dies silently, so the
+# expiry arithmetic matters more than it looks.
+with open(TOKENS, "w", encoding="utf-8") as fh:
+    json.dump({"unclaimed": {}, "claimed": {acct: {
+        "access_token": "tok_live", "refresh_token": "ref_1",
+        "expires_in": 14400, "claimed_at": int(time.time()),
+        "received_at": int(time.time())}}}, fh)
+check("fresh token returned as-is", ring_link.access_token() == "tok_live")
+
+with open(TOKENS, "w", encoding="utf-8") as fh:
+    json.dump({"unclaimed": {}, "claimed": {acct: {
+        "access_token": "tok_stale", "expires_in": 14400,
+        "received_at": int(time.time()) - 14400}}}, fh)
+# No refresh token stored: must not crash, must hand back what it has so the
+# caller gets a 401 from Ring rather than a None here.
+check("expired token without refresh still returns something",
+      ring_link.access_token() == "tok_stale")
+
+with open(TOKENS, "w", encoding="utf-8") as fh:
+    json.dump({"unclaimed": {}, "claimed": {}}, fh)
+check("no claimed account returns None", ring_link.access_token() is None)
+
 
 # ---------------------------------------------------------------- http
 
