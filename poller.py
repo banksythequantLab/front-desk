@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -101,6 +102,8 @@ def normalize(ev, device_id, device_name):
         "source_type": "history",
         "duration_ms": (a.get("end") - start) if a.get("end") and start else None,
         "thumbnail_url": a.get("thumbnail_url"),
+        "_start": start,
+        "_end": a.get("end"),
         "received_at": datetime.now(timezone.utc).isoformat(),
         "via": "poll",
     }
@@ -112,10 +115,83 @@ def persist(record):
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def fetch_frame(device_id, event, token):
+    """Pull a still from the middle of the event's recording.
+
+    History events carry no thumbnail_url — that field only exists on webhook
+    deliveries. The media endpoint is how a polled event gets an image: POST a
+    timestamp, follow the 303 to a pre-signed URL.
+
+    Note urllib RAISES on the 303 when redirects are disabled, so the error
+    branch below is the success path.
+    """
+    start, end = event.get("_start"), event.get("_end")
+    if not start:
+        return None, "event carried no start timestamp"
+    mid = int((start + end) / 2) if end else int(start)
+
+    class _NoRedir(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    opener = urllib.request.build_opener(_NoRedir)
+    body = {"type": "at_timestamp", "timestamp": mid,
+            "image_options": {"format": "jpeg",
+                              "resolution": {"width": 1920, "height": 1080}}}
+    req = urllib.request.Request(
+        ring_link.AVA_BASE + "/v1/devices/" + device_id + "/media/image/download",
+        data=json.dumps(body).encode(), method="POST",
+        headers={"Authorization": "Bearer " + token,
+                 "User-Agent": ring_link.USER_AGENT,
+                 "Accept": "*/*", "Content-Type": "application/json"})
+    try:
+        with opener.open(req, timeout=60) as r:
+            headers = dict(r.headers)
+    except urllib.error.HTTPError as e:
+        if e.code != 303:
+            return None, "image request HTTP %s" % e.code
+        headers = dict(e.headers)
+    except Exception as e:                                  # noqa: BLE001
+        return None, "image request failed: %s" % e
+
+    loc = headers.get("Location") or headers.get("location")
+    if not loc:
+        return None, "no pre-signed URL in response"
+    try:
+        r = urllib.request.Request(loc, headers={"User-Agent": ring_link.USER_AGENT})
+        with urllib.request.urlopen(r, timeout=90) as x:
+            data = x.read()
+    except Exception as e:                                  # noqa: BLE001
+        return None, "image download failed: %s" % e
+    if len(data) < 2048:
+        return None, "image too small (%d bytes)" % len(data)
+
+    fd, path = tempfile.mkstemp(suffix=".jpg", prefix="fd_poll_")
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    return path, None
+
+
 def classify_and_record(event):
     """Same two-record pattern frontdesk.py uses: event, then classification."""
-    from frontdesk import classify_event          # reuses snapshot fetch + rules
-    verdict = classify_event(event)
+    token = ring_link.access_token()
+    path, err = fetch_frame(event.get("device_id"), event, token) if token else (None, "no token")
+    if err:
+        verdict = {"disposition": "no_snapshot", "escalate": False, "why": err}
+    else:
+        try:
+            sys.path.insert(0, os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "classifier"))
+            from classify import classify as run_classify
+            verdict = run_classify(path)
+        except Exception as e:                              # noqa: BLE001
+            verdict = {"disposition": "error", "escalate": True,
+                       "why": "classifier raised: %s" % e}
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
     persist({"record_type": "classification",
              "event_id": event["event_id"],
              "device_id": event.get("device_id"),

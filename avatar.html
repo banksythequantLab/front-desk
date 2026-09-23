@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Front Desk</title>
+<style>
+  :root{--bg:#0a0f18;--fg:#eef3f9;--mute:#8a9ab0;--dim:#55637a;
+        --acc:#45cbb0;--warm:#e8b06a;--line:#22304a}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:radial-gradient(ellipse at 50% 35%,#101a28 0%,var(--bg) 70%);
+       color:var(--fg);font-family:"Segoe UI",system-ui,sans-serif;
+       min-height:100vh;display:flex;flex-direction:column;align-items:center;
+       justify-content:center;gap:2.4vh;padding:4vh}
+  svg{width:min(46vh,90vw);height:auto;overflow:visible}
+  .caption{font-size:2.5vh;color:var(--mute);text-align:center;max-width:36ch;
+           min-height:8vh;line-height:1.55}
+  .row{display:flex;gap:10px;width:min(580px,93vw)}
+  input{flex:1;padding:14px 16px;border-radius:10px;border:1px solid var(--line);
+        background:#0d1522;color:var(--fg);font-size:16px}
+  button{background:var(--acc);color:#07120f;border:0;font-weight:700;
+         padding:14px 22px;border-radius:10px;cursor:pointer;font-size:16px}
+  button:disabled{opacity:.4;cursor:default}
+  .states{display:flex;gap:8px}
+  .states button{background:transparent;color:var(--dim);border:1px solid var(--line);
+                 font-weight:600;padding:8px 14px;font-size:13px}
+  .note{position:fixed;bottom:2vh;font-size:1.6vh;color:var(--dim)}
+</style></head>
+<body>
+
+<!-- Deliberately not photoreal. A convincing likeness of the attorney speaking
+     in his cloned voice could lead a visitor to think they are speaking with
+     him; this reads as a machine at a glance. -->
+<svg viewBox="0 0 320 320" aria-label="Front Desk assistant">
+  <defs>
+    <radialGradient id="face" cx="50%" cy="38%" r="62%">
+      <stop offset="0%" stop-color="#1b2d42"/>
+      <stop offset="70%" stop-color="#121e2e"/>
+      <stop offset="100%" stop-color="#0c1521"/>
+    </radialGradient>
+    <radialGradient id="iris" cx="42%" cy="35%" r="70%">
+      <stop offset="0%" stop-color="#7ce8d0"/>
+      <stop offset="60%" stop-color="#45cbb0"/>
+      <stop offset="100%" stop-color="#1f8f7a"/>
+    </radialGradient>
+    <filter id="soft"><feGaussianBlur stdDeviation="6"/></filter>
+  </defs>
+
+  <!-- presence halo: breathes slowly, brightens when speaking -->
+  <ellipse id="halo" cx="160" cy="160" rx="132" ry="132" fill="#45cbb0"
+           opacity=".07" filter="url(#soft)"/>
+
+  <!-- head: a squircle, not a circle - less smiley-face -->
+  <g id="head">
+    <path id="skull" d="M160 34 C 236 34 286 84 286 160 C 286 236 236 286 160 286
+                        C 84 286 34 236 34 160 C 34 84 84 34 160 34 Z"
+          fill="url(#face)" stroke="#24374f" stroke-width="2"/>
+
+    <!-- brows: independent, so expressions can be asymmetric -->
+    <path id="browL" d="M104 108 L 146 104" stroke="#3a5a78" stroke-width="5"
+          stroke-linecap="round" fill="none"/>
+    <path id="browR" d="M174 104 L 216 108" stroke="#3a5a78" stroke-width="5"
+          stroke-linecap="round" fill="none"/>
+
+    <!-- eyes -->
+    <g id="eyeGroupL">
+      <ellipse id="scleraL" cx="122" cy="142" rx="24" ry="20" fill="#0a1420"/>
+      <g id="gazeL">
+        <circle cx="122" cy="142" r="13" fill="url(#iris)"/>
+        <circle cx="122" cy="142" r="5.5" fill="#05100e"/>
+        <circle cx="117" cy="137" r="3.4" fill="#cffaf0" opacity=".9"/>
+      </g>
+      <rect id="lidL" x="96" y="100" width="52" height="0" fill="#121e2e"/>
+    </g>
+    <g id="eyeGroupR">
+      <ellipse id="scleraR" cx="198" cy="142" rx="24" ry="20" fill="#0a1420"/>
+      <g id="gazeR">
+        <circle cx="198" cy="142" r="13" fill="url(#iris)"/>
+        <circle cx="198" cy="142" r="5.5" fill="#05100e"/>
+        <circle cx="193" cy="137" r="3.4" fill="#cffaf0" opacity=".9"/>
+      </g>
+      <rect id="lidR" x="172" y="100" width="52" height="0" fill="#121e2e"/>
+    </g>
+
+    <!-- mouth: a path so it can morph between viseme shapes -->
+    <path id="mouth" d="M126 212 Q 160 206 194 212 Q 160 218 126 212 Z"
+          fill="#45cbb0" opacity=".92"/>
+  </g>
+</svg>
+
+<div class="caption" id="caption">Good afternoon. How can I help you?</div>
+
+<div class="row">
+  <input id="text" value="Good afternoon. He's with a client right now - may I take a message?"
+         aria-label="What the receptionist should say">
+  <button id="say">Speak</button>
+</div>
+
+<div class="states">
+  <button data-state="idle">Idle</button>
+  <button data-state="listening">Listening</button>
+  <button data-state="thinking">Thinking</button>
+</div>
+
+<div class="note">Prototype &middot; stylised on purpose &middot; runs on the box</div>
