@@ -128,8 +128,26 @@ def fetch_frame(device_id, event, token):
     start, end = event.get("_start"), event.get("_end")
     if not start:
         return None, "event carried no start timestamp"
-    mid = int((start + end) / 2) if end else int(start)
 
+    # A single timestamp can land on a gap in the recording; the pre-signed URL
+    # then serves an empty object and S3 answers 416. Try the midpoint, then a
+    # couple of offsets into the event, before giving up.
+    stamps = []
+    if end and end > start:
+        stamps.append(int((start + end) / 2))
+    stamps += [int(start) + 2000, int(start) + 5000, int(start)]
+
+    last = "no candidate timestamps"
+    for ts in stamps:
+        path, err = _frame_at(device_id, ts, token)
+        if path:
+            return path, None
+        last = err
+    return None, last
+
+
+def _frame_at(device_id, mid, token):
+    """One attempt at one timestamp."""
     class _NoRedir(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *a, **k):
             return None
